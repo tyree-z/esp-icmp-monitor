@@ -2,16 +2,21 @@
 #include <ESPping.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
+#include <vector>
 
 // Configurable Parameters
-const char* ssid = "Sog";              // Replace with your SSID
-const char* password = "simonpeach";   // Replace with your Password
-const char* serverName = "https://eok255xjsca4nb2.m.pipedream.net/pingreport"; // Replace with your API endpoint
-const char* services[] = {"10.0.0.1", "8.8.8.8", "174.4.216.120"}; // Replace with IPs or domain names
-const int numServices = sizeof(services) / sizeof(services[0]);
-const int maxPings = 1;
-const int retryLimit = 3;
-const int delayTime = 30000; // 30 seconds
+const char* ssid = "<SSID>";
+const char* password = "<Password>";
+const char* serverName = "<Ping Report API Endpoint>";
+const char* serviceFetchURL = "<API Endpoint To Fetch Services>"; // fetch services
+const int pingRounds = 1; // 5 Pings Per Round
+const int retryLimit = 3; // Ping Retry Limit
+const int delayTime = 30000; // Wait 30 Seconds to Ping Services
+const unsigned long serviceFetchInterval = 5000; // Fetch Services Every 5 Seconds
+
+std::vector<String> services;
+unsigned long lastServiceFetch = 0;
+
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -20,6 +25,11 @@ void setup() {
 }
 
 void loop() {
+  if (millis() - lastServiceFetch > serviceFetchInterval) {
+    fetchServices();
+    lastServiceFetch = millis();
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     sendPingData();
   } else {
@@ -29,6 +39,7 @@ void loop() {
   delay(delayTime);
 }
 
+// Init Wireless Connection
 void connectToWiFi() {
   WiFi.begin(ssid, password);
   int retryCount = 0;
@@ -46,10 +57,44 @@ void connectToWiFi() {
   }
 }
 
+// Fetch Services
+void fetchServices() {
+  WiFiClientSecure wifiClient;
+  wifiClient.setInsecure();
+  HTTPClient http;
+
+  if (http.begin(wifiClient, serviceFetchURL)) {
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode > 0) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, payload);
+      updateServiceList(doc);
+    } else {
+      Serial.print("Error on fetching services: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  } else {
+    Serial.println("Unable to make HTTP connection");    
+  }
+}
+
+// Update JSON with new services
+void updateServiceList(DynamicJsonDocument &doc) {
+  services.clear();
+  for (JsonPair kv : doc.as<JsonObject>()) {
+    services.push_back(kv.value().as<String>());
+  }
+}
+
+// JSON Object to send to API
 JsonArray collectPingResults(String service, DynamicJsonDocument &doc) {
   JsonArray pingResults = doc.createNestedArray(service);
 
-  for (int i = 0; i < maxPings; i++) {
+  for (int i = 0; i < pingRounds; i++) {
+    digitalWrite(LED_BUILTIN, LOW);
     Ping.ping(service.c_str(), 5);
     int minTime = Ping.minTime();
     int avgTime = Ping.averageTime();
@@ -58,7 +103,8 @@ JsonArray collectPingResults(String service, DynamicJsonDocument &doc) {
     Serial.print("Ping stats for "); Serial.print(service);
     Serial.print(" - Min: "); Serial.print(minTime);
     Serial.print(" ms, Avg: "); Serial.print(avgTime);
-    Serial.print(" ms, Max: "); Serial.println(maxTime); // Debugging line
+    Serial.print(" ms, Max: "); Serial.println(maxTime);
+    digitalWrite(LED_BUILTIN, HIGH);
 
     JsonObject pingResult = pingResults.createNestedObject();
     if (minTime >= 0 && avgTime >= 0 && maxTime >= 0) {
@@ -66,42 +112,44 @@ JsonArray collectPingResults(String service, DynamicJsonDocument &doc) {
       pingResult["avg"] = avgTime;
       pingResult["max"] = maxTime;
     } else {
-      pingResult["result"] = "Failed"; // Indicate a failed ping
+      pingResult["result"] = "Failed";
     }
   }
   return pingResults;
 }
 
-
-
+// Send the pings!
 void sendPingData() {
   DynamicJsonDocument doc(1024);
-  for (int i = 0; i < numServices; i++) {
-    collectPingResults(services[i], doc);
+  String deviceID = WiFi.macAddress();
+  doc["device_id"] = deviceID;
+
+  for (String &service : services) {
+    collectPingResults(service, doc);
   }
   String jsonData;
   serializeJson(doc, jsonData);
   postToServer(jsonData);
 }
 
-
+// Send the report to API
 void postToServer(String jsonData) {
   WiFiClientSecure wifiClient;
-  wifiClient.setInsecure(); // Use this for an insecure connection, which is okay for basic projects
+  wifiClient.setInsecure();
 
   HTTPClient http;
-  if (http.begin(wifiClient, serverName)) {  // Initialize, start and connect to the server
+  if (http.begin(wifiClient, serverName)) {
     http.addHeader("Content-Type", "application/json");  
     int httpResponseCode = http.POST(jsonData);
     if (httpResponseCode > 0) {
       String response = http.getString();
-      Serial.println(httpResponseCode);
-      Serial.println(response);
+      Serial.println("Sent Ping Report");
+      Serial.print(httpResponseCode);
     } else {
       Serial.print("Error on sending POST: ");
-      Serial.println(httpResponseCode);
+      Serial.println("Sent Ping Report");
     }
-    http.end(); // Close connection
+    http.end();
   } else {
     Serial.println("Error in HTTP connection");    
   }
